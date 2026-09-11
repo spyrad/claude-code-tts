@@ -163,12 +163,20 @@ function Invoke-Mp3([string]$path) {
 
 function Get-ShortcutPath { Join-Path ([Environment]::GetFolderPath('Programs')) $ShortcutName }
 
-# Removes shortcuts of earlier versions - only if they point to this hook script.
+# True if the shortcut runs the hook script of THIS installation (the Start menu is global,
+# the Claude directory is not - never touch a shortcut that belongs to another installation).
+function Test-OwnShortcut([string]$path) {
+    if (-not (Test-Path $path)) { return $false }
+    $own = Join-Path $ClaudeDir "hooks\$HookMarker"
+    $arguments = (New-Object -ComObject WScript.Shell).CreateShortcut($path).Arguments
+    return $arguments -like "*`"$own`"*"
+}
+
+# Removes shortcuts of earlier versions - only if they belong to this installation.
 function Remove-LegacyShortcuts {
-    $shell = New-Object -ComObject WScript.Shell
     foreach ($name in $LegacyShortcutNames) {
         $path = Join-Path ([Environment]::GetFolderPath('Programs')) $name
-        if ((Test-Path $path) -and $shell.CreateShortcut($path).Arguments -like "*$HookMarker*") {
+        if (Test-OwnShortcut $path) {
             Remove-Item $path
             Write-Step OK "Removed old shortcut: $path"
         }
@@ -227,12 +235,14 @@ function Invoke-Uninstall {
         (Join-Path $ttsDir 'ca-bundle.pem'),
         (Join-Path $ttsDir 'python-path.txt'),
         (Join-Path $ttsDir 'voice.json'),
-        (Join-Path $ClaudeDir 'tts-off'),
-        (Get-ShortcutPath)
+        (Join-Path $ClaudeDir 'tts-off')
     )
     foreach ($file in $files) {
         if (Test-Path $file) { Remove-Item $file; Write-Step OK "Removed: $file" }
     }
+    $shortcut = Get-ShortcutPath
+    if (Test-OwnShortcut $shortcut) { Remove-Item $shortcut; Write-Step OK "Removed: $shortcut" }
+    elseif (Test-Path $shortcut) { Write-Step INFO "Kept $shortcut - it belongs to another installation." }
     Remove-LegacyShortcuts
     if ((Test-Path $ttsDir) -and -not (Get-ChildItem $ttsDir -Force)) { Remove-Item $ttsDir; Write-Step OK "Removed: $ttsDir" }
 
