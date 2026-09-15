@@ -8,6 +8,8 @@ Makes [Claude Code](https://claude.com/claude-code) read its answers aloud on Wi
 - Reads the **prose** of each answer: code blocks and long paths are skipped, table rows
   are read as sentences, headings and list items get a short pause.
 - **Stops by itself** when you send the next message, or anytime with **Ctrl+Alt+S**.
+- **Reads the last answer again** with **Ctrl+Alt+R**, and turns read-aloud **on or off**
+  with **Ctrl+Alt+T** (a short spoken "on"/"off" confirms it).
 - Starts speaking about 2 seconds after the answer is finished (first sentence is
   synthesized separately, the rest is prepared while it plays).
 
@@ -41,7 +43,9 @@ Append options to the one-liner (or to `install.cmd`):
 | `-FallbackVoice <name>` | Offline Windows voice, e.g. `"Microsoft Zira Desktop"`. Default: a voice matching the language of `-Voice` |
 | `-OfflineOnly` | Windows voice only - no Python, **nothing is sent to an online service** |
 | `-StopHotkey <keys>` | Hotkey that stops the speech, default `CTRL+ALT+S` |
-| `-NoHotkey` | Do not create the stop hotkey |
+| `-ReplayHotkey <keys>` | Hotkey that reads the last answer again, default `CTRL+ALT+R` |
+| `-ToggleHotkey <keys>` | Hotkey that turns read-aloud on or off, default `CTRL+ALT+T` |
+| `-NoHotkey` | Do not create any hotkey |
 | `-NoTest` | No test sentence at the end |
 | `-Uninstall` | Remove everything again (see below) |
 
@@ -53,9 +57,15 @@ and leaves all your other settings and hooks alone.
 | What | How |
 |------|-----|
 | Stop the current speech | **Ctrl+Alt+S** (any window), or just send your next message |
-| Pause read-aloud | create the empty file `%USERPROFILE%\.claude\tts-off` |
-| Resume read-aloud | delete that file |
+| Read the last answer again | **Ctrl+Alt+R** - also works while read-aloud is off |
+| Turn read-aloud off / on | **Ctrl+Alt+T** - you hear "Read-aloud off" / "Read-aloud on". Without the hotkey: create / delete the empty file `%USERPROFILE%\.claude\tts-off` |
 | Change voice or speed | edit `%USERPROFILE%\.claude\tts\voice.json` - applies to the next answer |
+
+While read-aloud is off, answers are still remembered, so you can switch it off for good and
+press Ctrl+Alt+R only for the answers you want to hear.
+
+Prefer a button? The three hotkeys are Start menu shortcuts (`Claude stop reading`,
+`Claude read again`, `Claude read-aloud on-off`) - pin them to the taskbar or Start.
 
 `voice.json`:
 
@@ -97,6 +107,9 @@ Files it creates:
 %USERPROFILE%\.claude\tts\ca-bundle.pem              certificate bundle (see below)
 %USERPROFILE%\.claude\tts\python-path.txt            Python found by the installer
 Start menu\Programs\Claude stop reading.lnk          stop hotkey
+Start menu\Programs\Claude read again.lnk            replay hotkey
+Start menu\Programs\Claude read-aloud on-off.lnk     on/off hotkey
+%TEMP%\claude-tts\last.txt                           text of the last answer, for replay
 ```
 
 **Certificate bundle:** antivirus products with HTTPS scanning and many corporate proxies
@@ -110,7 +123,7 @@ already trusts, so it works behind such setups without disabling anything.
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/spyrad/claude-code-tts/main/install.ps1))) -Uninstall
 ```
 
-Removes both hooks from `settings.json` (with a backup), the files above and the shortcut.
+Removes both hooks from `settings.json` (with a backup), the files above and the shortcuts.
 The Python package stays; remove it with `python -m pip uninstall edge-tts`.
 
 ## Troubleshooting
@@ -120,8 +133,9 @@ The Python package stays; remove it with `python -m pip uninstall edge-tts`.
 - **Always the robotic voice:** the online voice failed. See the log
   `%TEMP%\claude-tts\speak.log` - `fallback sapi` lines tell why. Common causes: no
   internet, a proxy that needs a login, or Python missing.
-- **Ctrl+Alt+S does nothing:** another program uses the same keys. Re-run the installer
-  with `-StopHotkey CTRL+ALT+Q` (it warns about clashes it can see).
+- **A hotkey does nothing:** another program uses the same keys. Re-run the installer
+  with e.g. `-StopHotkey CTRL+ALT+Q` (or `-ReplayHotkey` / `-ToggleHotkey`); it warns about
+  clashes it can see.
 - **"running scripts is disabled":** your organization blocks PowerShell scripts by policy;
   `-ExecutionPolicy Bypass` cannot override that.
 

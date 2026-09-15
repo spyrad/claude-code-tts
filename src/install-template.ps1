@@ -11,9 +11,11 @@
 #   -FallbackVoice <name>  offline Windows voice, e.g. "Microsoft Zira Desktop"
 #   -OfflineOnly           Windows voice only - no Python, nothing is sent to an online service
 #   -StopHotkey <keys>     global key combination that silences a running speech (default CTRL+ALT+S)
-#   -NoHotkey              do not create the stop shortcut
+#   -ReplayHotkey <keys>   reads the last answer again (default CTRL+ALT+R)
+#   -ToggleHotkey <keys>   turns read-aloud on or off (default CTRL+ALT+T)
+#   -NoHotkey              do not create the hotkey shortcuts
 #   -NoTest                no audible test at the end
-#   -Uninstall             remove hooks, files and the shortcut again
+#   -Uninstall             remove hooks, files and the shortcuts again
 #
 # Safe to run repeatedly: existing entries are detected, all other settings stay
 # untouched, and settings.json is backed up before it is changed.
@@ -24,6 +26,8 @@ param(
     [string]$FallbackVoice,
     [switch]$OfflineOnly,
     [string]$StopHotkey = 'CTRL+ALT+S',
+    [string]$ReplayHotkey = 'CTRL+ALT+R',
+    [string]$ToggleHotkey = 'CTRL+ALT+T',
     [switch]$NoHotkey,
     [switch]$NoTest,
     [switch]$Uninstall
@@ -41,7 +45,15 @@ __EDGE_SCRIPT__
 '@
 
 $HookMarker = 'speak-last-answer.ps1'
-$ShortcutName = 'Claude stop reading.lnk'
+# Start menu links with a global hotkey, each runs one mode of the hook script
+$Shortcuts = @(
+    @{ Name = 'Claude stop reading.lnk'; Mode = '-Stop'; Key = $StopHotkey; Option = '-StopHotkey'
+       Purpose = 'Stop reading'; Description = 'Stops the running Claude Code read-aloud' }
+    @{ Name = 'Claude read again.lnk'; Mode = '-Replay'; Key = $ReplayHotkey; Option = '-ReplayHotkey'
+       Purpose = 'Read the last answer again'; Description = 'Reads the last Claude Code answer aloud again' }
+    @{ Name = 'Claude read-aloud on-off.lnk'; Mode = '-Toggle'; Key = $ToggleHotkey; Option = '-ToggleHotkey'
+       Purpose = 'Read-aloud on/off'; Description = 'Turns Claude Code read-aloud on or off' }
+)
 $LegacyShortcutNames = @('Claude Vorlesen stoppen.lnk')   # names used by earlier private versions
 $SapiByCulture = @{
     'de-DE' = 'Microsoft Hedda Desktop'
@@ -161,7 +173,7 @@ function Invoke-Mp3([string]$path) {
     $player.Close()
 }
 
-function Get-ShortcutPath { Join-Path ([Environment]::GetFolderPath('Programs')) $ShortcutName }
+function Get-ShortcutPath([string]$name) { Join-Path ([Environment]::GetFolderPath('Programs')) $name }
 
 # True if the shortcut runs the hook script of THIS installation (the Start menu is global,
 # the Claude directory is not - never touch a shortcut that belongs to another installation).
@@ -183,6 +195,39 @@ function Remove-LegacyShortcuts {
     }
 }
 
+# Creates or updates one hotkey shortcut from $Shortcuts; returns the hotkey Windows accepted.
+function Set-HotkeyShortcut($spec, [string]$scriptPath) {
+    $shell = New-Object -ComObject WScript.Shell
+    $linkPath = Get-ShortcutPath $spec.Name
+    # other shortcuts with the same hotkey would make Windows pick one at random
+    $wantedKey = ($spec.Key -replace '\s', '').ToUpper()
+    $normalize = { param($k) (@($k.ToUpper() -split '\+') | Sort-Object) -join '+' }
+    $clashes = @(foreach ($folder in [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'), [Environment]::GetFolderPath('Desktop')) {
+        Get-ChildItem $folder -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $linkPath } |
+            Where-Object { $key = $shell.CreateShortcut($_.FullName).Hotkey; $key -and (& $normalize $key) -eq (& $normalize $wantedKey) } |
+            ForEach-Object { $_.Name }
+    })
+    $existed = Test-Path $linkPath
+    $link = $shell.CreateShortcut($linkPath)
+    $link.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $link.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" $($spec.Mode)"
+    $link.WindowStyle = 7
+    $link.Hotkey = $wantedKey
+    $link.Description = $spec.Description
+    $link.Save()
+    $accepted = $shell.CreateShortcut($linkPath).Hotkey
+    if ($accepted) {
+        Write-Step OK ("Hotkey {0}: {1} - {2} ({3})" -f $(if ($existed) { 'updated' } else { 'created' }), $accepted, $spec.Purpose, $linkPath)
+    } else {
+        Write-Step WARN "Hotkey '$($spec.Key)' was not accepted - shortcut created without a hotkey: $linkPath"
+    }
+    if ($clashes.Count -gt 0) {
+        Write-Step WARN "$($spec.Key) is already used by: $($clashes -join ', ') - pick another one with $($spec.Option)."
+    }
+    return $accepted
+}
+
 function Invoke-Uninstall {
     Write-Host ''
     Write-Host 'claude-code-tts - uninstall' -ForegroundColor Cyan
@@ -190,7 +235,8 @@ function Invoke-Uninstall {
     Write-Host ''
 
     # silence a running speech first (by its recorded PID only)
-    $pidFile = Join-Path $env:TEMP 'claude-tts\speaker.pid'
+    $stateDir = Join-Path $env:TEMP 'claude-tts'
+    $pidFile = Join-Path $stateDir 'speaker.pid'
     if (Test-Path $pidFile) {
         $speakerPid = Get-Content $pidFile -ErrorAction SilentlyContinue
         if ($speakerPid) {
@@ -235,14 +281,17 @@ function Invoke-Uninstall {
         (Join-Path $ttsDir 'ca-bundle.pem'),
         (Join-Path $ttsDir 'python-path.txt'),
         (Join-Path $ttsDir 'voice.json'),
-        (Join-Path $ClaudeDir 'tts-off')
+        (Join-Path $ClaudeDir 'tts-off'),
+        (Join-Path $stateDir 'last.txt')    # text of the last answer, kept for replay
     )
     foreach ($file in $files) {
         if (Test-Path $file) { Remove-Item $file; Write-Step OK "Removed: $file" }
     }
-    $shortcut = Get-ShortcutPath
-    if (Test-OwnShortcut $shortcut) { Remove-Item $shortcut; Write-Step OK "Removed: $shortcut" }
-    elseif (Test-Path $shortcut) { Write-Step INFO "Kept $shortcut - it belongs to another installation." }
+    foreach ($spec in $Shortcuts) {
+        $shortcut = Get-ShortcutPath $spec.Name
+        if (Test-OwnShortcut $shortcut) { Remove-Item $shortcut; Write-Step OK "Removed: $shortcut" }
+        elseif (Test-Path $shortcut) { Write-Step INFO "Kept $shortcut - it belongs to another installation." }
+    }
     Remove-LegacyShortcuts
     if ((Test-Path $ttsDir) -and -not (Get-ChildItem $ttsDir -Force)) { Remove-Item $ttsDir; Write-Step OK "Removed: $ttsDir" }
 
@@ -387,39 +436,15 @@ function Invoke-Install {
     }
     if ($changed) { Save-Settings $settings $settingsPath }
 
-    # 5. Stop shortcut: a Start menu link with a global hotkey that runs the -Stop mode
-    $hotkeyLabel = $null
+    # 5. Hotkey shortcuts: Start menu links with a global hotkey (stop, replay, on/off)
+    $hotkeys = @()
     if ($NoHotkey) {
-        Write-Step INFO 'Stop hotkey skipped (-NoHotkey).'
+        Write-Step INFO 'Hotkeys skipped (-NoHotkey).'
     } else {
         Remove-LegacyShortcuts
-        $shell = New-Object -ComObject WScript.Shell
-        $linkPath = Get-ShortcutPath
-        # other shortcuts with the same hotkey would make Windows pick one at random
-        $wantedKey = ($StopHotkey -replace '\s', '').ToUpper()
-        $normalize = { param($k) (@($k.ToUpper() -split '\+') | Sort-Object) -join '+' }
-        $clashes = @(foreach ($folder in [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'), [Environment]::GetFolderPath('Desktop')) {
-            Get-ChildItem $folder -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -ne $linkPath } |
-                Where-Object { $key = $shell.CreateShortcut($_.FullName).Hotkey; $key -and (& $normalize $key) -eq (& $normalize $wantedKey) } |
-                ForEach-Object { $_.Name }
-        })
-        $existed = Test-Path $linkPath
-        $link = $shell.CreateShortcut($linkPath)
-        $link.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $link.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -Stop"
-        $link.WindowStyle = 7
-        $link.Hotkey = $wantedKey
-        $link.Description = 'Stops the running Claude Code read-aloud'
-        $link.Save()
-        $hotkeyLabel = $shell.CreateShortcut($linkPath).Hotkey
-        if ($hotkeyLabel) {
-            Write-Step OK ("Stop hotkey {0}: {1} ({2})" -f $(if ($existed) { 'updated' } else { 'created' }), $hotkeyLabel, $linkPath)
-        } else {
-            Write-Step WARN "Hotkey '$StopHotkey' was not accepted - shortcut created without a hotkey: $linkPath"
-        }
-        if ($clashes.Count -gt 0) {
-            Write-Step WARN "The same hotkey is already used by: $($clashes -join ', ') - pick another one with -StopHotkey."
+        foreach ($spec in $Shortcuts) {
+            $accepted = Set-HotkeyShortcut $spec $scriptPath
+            if ($accepted) { $hotkeys += '{0}: {1}' -f $spec.Purpose, $accepted }
         }
     }
 
@@ -438,8 +463,11 @@ function Invoke-Install {
     $active = if ($onlineMp3) { "$edgeVoice (offline fallback: $($sapiVoice.Name))" } else { $sapiVoice.Name }
     Write-Host "Done. Reading voice: $active" -ForegroundColor Cyan
     Write-Host 'Last step: open /hooks once in Claude Code, or restart Claude Code.' -ForegroundColor Cyan
-    if ($hotkeyLabel) { Write-Host "Stop reading: $hotkeyLabel (works in any window, may take ~1 s)." }
-    Write-Host "Pause read-aloud: create the file $ClaudeDir\tts-off - delete it to turn speech back on."
+    if ($hotkeys.Count -gt 0) {
+        Write-Host 'Hotkeys (work in any window, may take ~1 s):'
+        $hotkeys | ForEach-Object { Write-Host "  $_" }
+    }
+    Write-Host "Pause read-aloud without a hotkey: create the file $ClaudeDir\tts-off - delete it to turn speech back on."
 }
 
 if ($Uninstall) { Invoke-Uninstall } else { Invoke-Install }

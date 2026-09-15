@@ -2,17 +2,22 @@
 # Online voice via edge-tts, automatic fallback to an offline Windows (SAPI) voice.
 #
 # Modes:
-#   (default)  hook mode - reads the Stop hook JSON from stdin, speaks in the background
+#   (default)  hook mode - reads the Stop hook JSON from stdin, remembers the text and
+#              speaks it in the background (unless read-aloud is off)
 #   -Stop      silences a running speech (UserPromptSubmit hook and the stop hotkey)
+#   -Replay    reads the last answer again, also while read-aloud is off (replay hotkey)
+#   -Toggle    turns read-aloud on or off and says which (on/off hotkey)
 #   -DryRun    hook mode, but prints the text instead of speaking (for testing)
 #   -Worker    internal - speaks the given text file, then deletes it
 #
 # Voices: tts\voice.json next to the hooks folder (written by the installer), e.g.
 #   { "engine": "edge", "edgeVoice": "en-US-AriaNeural", "edgeRate": "+0%",
 #     "sapiVoice": "Microsoft Zira Desktop", "sapiRate": 1 }
-# Off switch: create the file <claude dir>\tts-off (delete it to turn speech back on).
+# Off switch: the file <claude dir>\tts-off (-Toggle creates and deletes it).
 param(
     [switch]$Stop,
+    [switch]$Replay,
+    [switch]$Toggle,
     [switch]$DryRun,
     [switch]$Worker,
     [string]$TextFile
@@ -46,10 +51,18 @@ if (Test-Path $configFile) {
 $StateDir   = Join-Path $env:TEMP 'claude-tts'
 $PidFile    = Join-Path $StateDir 'speaker.pid'
 $LogFile    = Join-Path $StateDir 'speak.log'
+$LastFile   = Join-Path $StateDir 'last.txt'    # spoken text of the last answer, for -Replay
 $OffFlag    = Join-Path $ClaudeDir 'tts-off'
 $EdgeScript = Join-Path $TtsDir 'edge_say.py'
 
+# short confirmations, spoken offline in the language of the configured voice
+$Announcements = @{
+    'de' = @{ on = 'Vorlesen an.'; off = 'Vorlesen aus.'; empty = 'Nichts zum Wiederholen.' }
+    'en' = @{ on = 'Read-aloud on.'; off = 'Read-aloud off.'; empty = 'Nothing to repeat.' }
+}
+
 function Write-Log([string]$message) {
+    New-Item -ItemType Directory -Force $StateDir -ErrorAction SilentlyContinue | Out-Null
     Add-Content -Path $LogFile -Value ('{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $message) -ErrorAction SilentlyContinue
 }
 
@@ -62,6 +75,18 @@ function Stop-Speaker {
             Stop-Process -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $PidFile -ErrorAction SilentlyContinue
+}
+
+# Replaces a running speech with a hidden worker process that speaks $text.
+function Start-Speaker([string]$text) {
+    New-Item -ItemType Directory -Force $StateDir | Out-Null
+    $textPath = Join-Path $StateDir ('say-' + [guid]::NewGuid().ToString('N') + '.txt')
+    [IO.File]::WriteAllText($textPath, $text, [Text.Encoding]::UTF8)
+    Stop-Speaker
+    $proc = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$PSCommandPath`"", '-Worker', '-TextFile', "`"$textPath`"")
+    Set-Content -Path $PidFile -Value $proc.Id
 }
 
 function Get-LastAnswer($payload) {
@@ -163,6 +188,12 @@ function Invoke-Sapi([string]$text) {
     $synth.Speak($text)
 }
 
+function Invoke-Announcement([string]$key) {
+    $language = ($EdgeVoice -split '-')[0]
+    if (-not $Announcements.ContainsKey($language)) { $language = 'en' }
+    Invoke-Sapi $Announcements[$language][$key]
+}
+
 # Starts edge-tts for one chunk in the background; returns the process or $null.
 function Start-EdgeSynth([string]$python, [string]$text, [string]$basePath) {
     [IO.File]::WriteAllText("$basePath.txt", $text, [Text.Encoding]::UTF8)
@@ -242,9 +273,34 @@ if ($Worker) {
 
 if ($Stop) { Stop-Speaker; exit 0 }
 
-try {
-    if (Test-Path $OffFlag) { exit 0 }
+if ($Replay) {
+    $text = if (Test-Path $LastFile) { [IO.File]::ReadAllText($LastFile, [Text.Encoding]::UTF8) }
+    if ($text) {
+        Start-Speaker $text
+        Write-Log "replay: $($text.Length) chars"
+    } else {
+        Stop-Speaker
+        Write-Log 'replay: nothing remembered yet'
+        Invoke-Announcement 'empty'
+    }
+    exit 0
+}
 
+if ($Toggle) {
+    Stop-Speaker
+    if (Test-Path $OffFlag) {
+        Remove-Item $OffFlag -ErrorAction SilentlyContinue
+        Write-Log 'toggle: on'
+        Invoke-Announcement 'on'
+    } else {
+        New-Item -ItemType File -Force $OffFlag | Out-Null
+        Write-Log 'toggle: off'
+        Invoke-Announcement 'off'
+    }
+    exit 0
+}
+
+try {
     $reader = New-Object IO.StreamReader([Console]::OpenStandardInput(), [Text.Encoding]::UTF8)
     $raw = $reader.ReadToEnd()
     if (-not $raw) { exit 0 }
@@ -257,15 +313,12 @@ try {
 
     if ($DryRun) { Write-Output $spoken; exit 0 }
 
+    # remembered even while read-aloud is off, so -Replay can read it on demand
     New-Item -ItemType Directory -Force $StateDir | Out-Null
-    $textPath = Join-Path $StateDir ('say-' + [guid]::NewGuid().ToString('N') + '.txt')
-    [IO.File]::WriteAllText($textPath, $spoken, [Text.Encoding]::UTF8)
+    [IO.File]::WriteAllText($LastFile, $spoken, [Text.Encoding]::UTF8)
+    if (Test-Path $OffFlag) { exit 0 }
 
-    Stop-Speaker
-    $proc = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', "`"$PSCommandPath`"", '-Worker', '-TextFile', "`"$textPath`"")
-    Set-Content -Path $PidFile -Value $proc.Id
+    Start-Speaker $spoken
     Write-Log "hook: $($spoken.Length) chars, engine $Engine"
 
     # leftovers from interrupted speeches
