@@ -150,6 +150,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 `build.ps1` embeds `src/speak-last-answer.ps1` and `src/edge_say.py` into
 `src/install-template.ps1` and checks that the result is ASCII-only and parses.
 
+## Related
+
+[claude-code-statusline](https://github.com/spyrad/claude-code-statusline) - a status line
+for Claude Code on Windows, built the same way: model, repo and branch, rate-limit window
+and context usage.
+
 ## License
 
 [MIT](LICENSE)
